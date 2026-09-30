@@ -15,7 +15,7 @@ concurrency:
 jobs:
   preflight:
     name: Check Unity license secrets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
@@ -38,7 +38,7 @@ jobs:
     name: Read cache lanes
     needs: preflight
     if: needs.preflight.outputs.enabled == 'true' && vars.UNITY_RUNS_ON == ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
@@ -58,7 +58,7 @@ jobs:
   warm:
     name: Warm ${{ matrix.lane.name }}
     needs: lanes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
