@@ -50,7 +50,7 @@ When `UNITY_SERIAL` is not set and `UNITY_RUNS_ON` is empty, a `preflight` job i
 
 | Variable | Default | Effect |
 |---|---|---|
-| `UNITY_RUNS_ON` | `"ubuntu-latest"` | The `runs-on` value of every Unity job, as JSON. For example `["self-hosted", "linux", "unity"]`. When it is set, `Cache warm` does not run. |
+| `UNITY_RUNS_ON` | `"ubuntu-24.04"` | The `runs-on` value of every Unity job, as JSON. For example `["self-hosted", "linux", "unity"]`. When it is set, `Cache warm` does not run. |
 | `PAGES_PROFILE` | empty | The name of a WebGL profile to deploy to GitHub Pages after a successful build on the default branch. Empty turns the deploy off. |
 
 ### Permissions
@@ -201,7 +201,7 @@ Not proven, because this repository has not run on GitHub yet:
 
 - `cli-serial` and `editor-serial` activation on a fresh runner, and the license return at teardown. The same Editor `-serial -username -password` invocation licenses GameCI runs, but it has not run here;
 - whether `unity license return` works after an Editor activation without a signed-in CLI;
-- the Editor and WebGL module install on `ubuntu-latest`, and whether `unity_repair_modules.sh` still has anything to repair on CLI 1.0.0-beta.10;
+- the Editor and WebGL module install on `ubuntu-24.04`, and whether `unity_repair_modules.sh` still has anything to repair on CLI 1.0.0-beta.10;
 - the disk cleanup thresholds, the Library, LFS and Pages steps, and all timings.
 
 The first run on GitHub will settle these points.
@@ -252,7 +252,7 @@ Run only one Unity job at a time on each self-hosted runner. Parallel jobs on on
 
 - **The CLI version is pinned.** `setup-unity` installs `1.0.0-beta.10` and fails if the installer delivers a different version. Unity publishes only beta releases of the CLI, and a pin keeps a new beta out of your checks until a commit changes it. Change `cli-version` in `setup-unity`, or pass it as an input.
 - **Module unpack defect.** Unity CLI 1.0.0-beta.6 unpacked platform modules one folder too deep (`PlaybackEngines/<Module>/Editor/Data/PlaybackEngines/<Module>/`). The install still reported success, and the build failed much later. `unity_repair_modules.sh` fixes that layout, and does nothing when the layout is correct.
-- **Audio needs ffmpeg.** The Unity audio importer calls `ffmpeg` to make AAC, which WebGL requires, and `ubuntu-latest` does not have ffmpeg. If your project imports audio for WebGL, add `sudo apt-get install -y ffmpeg` before the build step.
+- **Audio needs ffmpeg.** The Unity audio importer calls `ffmpeg` to make AAC, which WebGL requires, and `ubuntu-24.04` does not have ffmpeg. If your project imports audio for WebGL, add `sudo apt-get install -y ffmpeg` before the build step.
 - **Headless Editor runs change tracked files.** Opening a project in batch mode can rewrite files in `ProjectSettings/`. That does not matter in CI. On your own machine, check `git status` after you run these commands.
 
 ## Run it locally
