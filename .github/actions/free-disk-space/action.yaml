@@ -1,0 +1,41 @@
+name: Free disk space
+description: Make room for a Unity Editor on a GitHub-hosted runner, then fail early on any runner that is still short of space.
+
+inputs:
+  min-free-mib:
+    description: Free MiB this job needs on the workspace filesystem.
+    required: false
+    default: '25600'
+
+runs:
+  using: composite
+  steps:
+    - name: Remove preinstalled toolchains (GitHub-hosted)
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      env:
+        MIN_FREE_MIB: ${{ inputs.min-free-mib }}
+      run: |
+        set -euo pipefail
+        free_mib() { df -Pm "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'; }
+        echo "Free before cleanup: $(free_mib) MiB"
+        if [ "$(free_mib)" -ge "$MIN_FREE_MIB" ]; then
+          exit 0
+        fi
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift &
+        docker image prune --all --force > /dev/null || true
+        wait
+        echo "Free after cleanup: $(free_mib) MiB"
+
+    - name: Check free disk space
+      shell: bash
+      env:
+        MIN_FREE_MIB: ${{ inputs.min-free-mib }}
+      run: |
+        set -euo pipefail
+        free="$(df -Pm "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')"
+        if [ "$free" -lt "$MIN_FREE_MIB" ]; then
+          echo "::error::Only $free MiB free on the workspace filesystem, and this job needs $MIN_FREE_MIB MiB."
+          exit 1
+        fi
+        echo "$free MiB free; this job needs $MIN_FREE_MIB MiB."

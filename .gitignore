@@ -1,0 +1,13 @@
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Bb]uilds/
+/artifacts/
+/.vs/
+/.idea/
+*.csproj
+*.sln
+*.slnx
+__pycache__/

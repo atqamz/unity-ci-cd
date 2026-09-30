@@ -1,0 +1,243 @@
+name: Build
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: Comma-separated profile names from build_profiles.json. Empty builds every profile.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARTIFACT_PREFIX: build
+
+jobs:
+  preflight:
+    name: Check Unity license secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check for license secrets
+        id: check
+        env:
+          HAS_SERIAL: ${{ secrets.UNITY_SERIAL != '' }}
+          HAS_RUNNER: ${{ vars.UNITY_RUNS_ON != '' }}
+          README_URL: ${{ github.server_url }}/${{ github.repository }}#secrets
+        run: |
+          if [ "$HAS_SERIAL" = true ] || [ "$HAS_RUNNER" = true ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Unity jobs were skipped because no license secrets are configured. See [Secrets]($README_URL)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  profiles:
+    name: Read build profiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - name: Check out the profile list
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/workflows/build_profiles.json
+          sparse-checkout-cone-mode: false
+
+      - name: Select profiles
+        id: read
+        env:
+          SELECTED: ${{ inputs.profiles }}
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c --arg selected "$SELECTED" '
+            ($selected | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $names
+            | map(select(($names | length) == 0 or (.name as $name | $names | index($name))))
+          ' .github/workflows/build_profiles.json)"
+          if [ "$matrix" = "[]" ]; then
+            echo "::error::No profile in build_profiles.json matches '$SELECTED'."
+            exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Building: $matrix"
+
+  build:
+    name: Build ${{ matrix.profile.name }}
+    needs: [preflight, profiles]
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ${{ fromJSON(vars.UNITY_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.profiles.outputs.matrix) }}
+    env:
+      OUTPUT: Builds/${{ matrix.profile.name }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Clean the carried-over workspace (self-hosted)
+        if: runner.environment != 'github-hosted'
+        run: git clean -ffdx -e Library
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+        with:
+          min-free-mib: '25600'
+
+      - name: Restore Git LFS
+        uses: ./.github/actions/restore-git-lfs
+
+      - name: Restore Unity Library
+        id: library
+        uses: ./.github/actions/library-cache
+        with:
+          name: ${{ matrix.profile.name }}
+
+      - name: Set up Unity
+        id: unity
+        uses: ./.github/actions/setup-unity
+        with:
+          modules: ${{ matrix.profile.modules }}
+          unity-serial: ${{ secrets.UNITY_SERIAL }}
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-service-account-id: ${{ secrets.UNITY_SERVICE_ACCOUNT_ID }}
+          unity-service-account-secret: ${{ secrets.UNITY_SERVICE_ACCOUNT_SECRET }}
+
+      - name: Build player
+        id: build
+        env:
+          TARGET: ${{ matrix.profile.target }}
+          BUILD_PROFILE: ${{ matrix.profile.buildProfile }}
+        run: |
+          set +e
+          mkdir -p artifacts
+          profile_args=()
+          [ -z "$BUILD_PROFILE" ] || profile_args=(-activeBuildProfile "$BUILD_PROFILE")
+          unity run . --timeout 6000 -- \
+            -nographics \
+            -buildTarget "$TARGET" \
+            "${profile_args[@]}" \
+            -executeMethod CIHelper.Build \
+            -buildOutput "$OUTPUT" \
+            -logFile "$PWD/artifacts/build.log"
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            verdict=built
+          elif bash .github/scripts/annotate_build_failure.sh artifacts/build.log; then
+            verdict=build-failed
+          elif [ "$rc" -eq 6 ]; then
+            verdict=editor-failed
+          else
+            verdict="unexpected-exit-$rc"
+          fi
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Validate WebGL payload
+        if: matrix.profile.target == 'WebGL'
+        run: bash .github/scripts/validate_webgl_payload.sh "$OUTPUT" "Unity output"
+
+      - name: Upload player
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-${{ matrix.profile.name }}
+          path: ${{ env.OUTPUT }}/
+          if-no-files-found: error
+
+      - name: Write job summary
+        if: always()
+        env:
+          PROFILE: ${{ matrix.profile.name }}
+          TARGET: ${{ matrix.profile.target }}
+          VERDICT: ${{ steps.build.outputs.verdict || 'not run' }}
+          EDITOR: ${{ steps.unity.outputs.editor-version || 'not installed' }}
+          LICENSE_MODE: ${{ steps.unity.outputs.license-mode || 'not active' }}
+          LIBRARY: ${{ steps.library.outputs.state || 'unknown' }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id || 'none' }}
+        run: |
+          {
+            echo "## Build $PROFILE ($TARGET)"
+            echo
+            echo "| Verdict | Editor | License | Library | Artifact id |"
+            echo "|---|---|---|---|---|"
+            echo "| $VERDICT | $EDITOR | $LICENSE_MODE | $LIBRARY | $ARTIFACT_ID |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Editor log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-${{ matrix.profile.name }}-log
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Tear down Unity
+        if: always()
+        uses: ./.github/actions/teardown-unity
+        with:
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-service-account-id: ${{ secrets.UNITY_SERVICE_ACCOUNT_ID }}
+          unity-service-account-secret: ${{ secrets.UNITY_SERVICE_ACCOUNT_SECRET }}
+
+  pages:
+    name: Deploy ${{ vars.PAGES_PROFILE }} to GitHub Pages
+    needs: build
+    if: vars.PAGES_PROFILE != '' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Check out the payload validator
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts/validate_webgl_payload.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Download player
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-${{ vars.PAGES_PROFILE }}
+          path: site
+
+      - name: Validate downloaded payload
+        run: bash .github/scripts/validate_webgl_payload.sh site "downloaded artifact"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4

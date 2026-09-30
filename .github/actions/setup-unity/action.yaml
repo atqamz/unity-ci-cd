@@ -1,0 +1,121 @@
+name: Set up Unity
+description: Install the pinned Unity CLI and the Editor named by ProjectSettings/ProjectVersion.txt, then activate a license.
+
+inputs:
+  modules:
+    description: Comma-separated Editor module ids to install with the Editor, for example webgl or android. Empty installs the base Editor.
+    required: false
+    default: ''
+  cli-version:
+    description: Exact Unity CLI version to install. The step fails when the installer delivers anything else.
+    required: false
+    default: 1.0.0-beta.10
+  unity-serial:
+    description: License serial. Required unless the runner already holds an active license.
+    required: false
+    default: ''
+  unity-email:
+    description: Unity account email, for Editor activation.
+    required: false
+    default: ''
+  unity-password:
+    description: Unity account password, for Editor activation.
+    required: false
+    default: ''
+  unity-service-account-id:
+    description: Unity service account key id, for CLI activation.
+    required: false
+    default: ''
+  unity-service-account-secret:
+    description: Unity service account secret key, for CLI activation.
+    required: false
+    default: ''
+
+outputs:
+  editor-version:
+    description: Editor version read from ProjectSettings/ProjectVersion.txt.
+    value: ${{ steps.editor.outputs.version }}
+  editor-path:
+    description: Absolute path to the Editor binary.
+    value: ${{ steps.editor.outputs.path }}
+  license-mode:
+    description: How the license became active - preexisting, cli-serial or editor-serial.
+    value: ${{ steps.license.outputs.mode }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Unity CLI
+      shell: bash
+      env:
+        UNITY_CLI_VERSION: ${{ inputs.cli-version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.sh | bash
+        installed="$("$HOME/.local/bin/unity" --version)"
+        if [ "$installed" != "$UNITY_CLI_VERSION" ]; then
+          echo "::error::The Unity CLI reports $installed, but $UNITY_CLI_VERSION is pinned."
+          exit 1
+        fi
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        {
+          echo "UNITY_NON_INTERACTIVE=1"
+          echo "UNITY_FORMAT=github"
+        } >> "$GITHUB_ENV"
+
+    - name: Install Unity Editor
+      id: editor
+      shell: bash
+      env:
+        MODULES: ${{ inputs.modules }}
+      run: |
+        set -euo pipefail
+        version="$(sed -n 's/^m_EditorVersion: //p' ProjectSettings/ProjectVersion.txt | tr -d '[:space:]')"
+        if [ -z "$version" ]; then
+          echo "::error::ProjectSettings/ProjectVersion.txt names no m_EditorVersion."
+          exit 1
+        fi
+
+        module_args=()
+        IFS=',' read -r -a requested <<< "$MODULES"
+        for module in "${requested[@]}"; do
+          module="${module//[[:space:]]/}"
+          [ -z "$module" ] || module_args+=(--module "$module")
+        done
+
+        installed_editor() {
+          unity editors --installed --format json \
+            | jq -er --arg version "$version" 'first(.data[] | select(.version == $version) | .location)'
+        }
+
+        if path="$(installed_editor)"; then
+          echo "Editor $version is already installed at $path; skipping the install."
+        else
+          unity install "$version" "${module_args[@]}" --yes --accept-eula
+          path="$(installed_editor)"
+        fi
+        test -x "$path"
+
+        bash "$GITHUB_ACTION_PATH/../../scripts/unity_repair_modules.sh" "$path"
+        echo "Platform modules present:"
+        find "$(dirname "$path")/Data/PlaybackEngines" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' 2>/dev/null | sort || true
+
+        {
+          echo "version=$version"
+          echo "path=$path"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "UNITY_EDITOR_VERSION=$version"
+          echo "UNITY_EDITOR_PATH=$path"
+        } >> "$GITHUB_ENV"
+
+    - name: Activate Unity license
+      id: license
+      shell: bash
+      env:
+        UNITY_SERIAL: ${{ inputs.unity-serial }}
+        UNITY_EMAIL: ${{ inputs.unity-email }}
+        UNITY_PASSWORD: ${{ inputs.unity-password }}
+        UNITY_SERVICE_ACCOUNT_ID: ${{ inputs.unity-service-account-id }}
+        UNITY_SERVICE_ACCOUNT_SECRET: ${{ inputs.unity-service-account-secret }}
+      run: bash "$GITHUB_ACTION_PATH/../../scripts/unity_license.sh" activate

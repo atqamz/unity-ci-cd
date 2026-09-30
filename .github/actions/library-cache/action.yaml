@@ -1,0 +1,73 @@
+name: Unity Library cache
+description: Restore the Unity Library folder on GitHub-hosted runners, and save it at the end of a successful job outside pull requests.
+
+inputs:
+  name:
+    description: Cache lane. Jobs that open the project under the same conditions (build target, build profile) share a name.
+    required: true
+
+outputs:
+  state:
+    description: What the job starts from - exact, partial, cold or carried over.
+    value: ${{ steps.report.outputs.state }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute Library cache key
+      id: key
+      shell: bash
+      env:
+        LANE: ${{ inputs.name }}
+        EDITOR_HASH: ${{ hashFiles('ProjectSettings/ProjectVersion.txt') }}
+        PACKAGES_HASH: ${{ hashFiles('Packages/packages-lock.json') }}
+      run: |
+        set -euo pipefail
+        prefix="Library-v1-$RUNNER_OS-${LANE//[^A-Za-z0-9._-]/-}-${EDITOR_HASH:0:16}-"
+        {
+          echo "prefix=$prefix"
+          echo "packages=$prefix${PACKAGES_HASH:0:16}-"
+          echo "key=$prefix${PACKAGES_HASH:0:16}-$GITHUB_SHA"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore Library, save it after the job
+      id: save
+      if: runner.environment == 'github-hosted' && github.event_name != 'pull_request'
+      uses: actions/cache@v5
+      with:
+        path: Library
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: |
+          ${{ steps.key.outputs.packages }}
+          ${{ steps.key.outputs.prefix }}
+
+    - name: Restore Library
+      id: restore
+      if: runner.environment == 'github-hosted' && github.event_name == 'pull_request'
+      uses: actions/cache/restore@v5
+      with:
+        path: Library
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: |
+          ${{ steps.key.outputs.packages }}
+          ${{ steps.key.outputs.prefix }}
+
+    - name: Report Library state
+      id: report
+      shell: bash
+      env:
+        RUNNER_KIND: ${{ runner.environment }}
+        HIT: ${{ steps.save.outputs.cache-hit || steps.restore.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        if [ "$HIT" = "true" ]; then
+          state="exact"
+        elif [ ! -d Library ]; then
+          state="cold"
+        elif [ "$RUNNER_KIND" = "github-hosted" ]; then
+          state="partial"
+        else
+          state="carried over"
+        fi
+        echo "Library: $state"
+        echo "state=$state" >> "$GITHUB_OUTPUT"

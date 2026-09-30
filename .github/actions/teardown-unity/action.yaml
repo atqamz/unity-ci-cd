@@ -1,0 +1,32 @@
+name: Tear down Unity
+description: Return the Unity license this job activated. A license the runner already held stays. Run it with if always().
+
+inputs:
+  unity-email:
+    description: Unity account email, for the Editor return fallback.
+    required: false
+    default: ''
+  unity-password:
+    description: Unity account password, for the Editor return fallback.
+    required: false
+    default: ''
+  unity-service-account-id:
+    description: Unity service account key id, for the CLI return.
+    required: false
+    default: ''
+  unity-service-account-secret:
+    description: Unity service account secret key, for the CLI return.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Return Unity license
+      shell: bash
+      env:
+        UNITY_EMAIL: ${{ inputs.unity-email }}
+        UNITY_PASSWORD: ${{ inputs.unity-password }}
+        UNITY_SERVICE_ACCOUNT_ID: ${{ inputs.unity-service-account-id }}
+        UNITY_SERVICE_ACCOUNT_SECRET: ${{ inputs.unity-service-account-secret }}
+      run: bash "$GITHUB_ACTION_PATH/../../scripts/unity_license.sh" return

@@ -1,0 +1,123 @@
+name: Cache warm
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-warm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Check Unity license secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check for license secrets
+        id: check
+        env:
+          HAS_SERIAL: ${{ secrets.UNITY_SERIAL != '' }}
+          HAS_RUNNER: ${{ vars.UNITY_RUNS_ON != '' }}
+          README_URL: ${{ github.server_url }}/${{ github.repository }}#secrets
+        run: |
+          if [ "$HAS_SERIAL" = true ] || [ "$HAS_RUNNER" = true ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Unity jobs were skipped because no license secrets are configured. See [Secrets]($README_URL)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  lanes:
+    name: Read cache lanes
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true' && vars.UNITY_RUNS_ON == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - name: Check out the profile list
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/workflows/build_profiles.json
+          sparse-checkout-cone-mode: false
+
+      - name: List lanes
+        id: read
+        run: |
+          set -euo pipefail
+          echo "matrix=$(jq -c '[{name: "editmode", target: "", modules: ""}] + .' .github/workflows/build_profiles.json)" >> "$GITHUB_OUTPUT"
+
+  warm:
+    name: Warm ${{ matrix.lane.name }}
+    needs: lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.lanes.outputs.matrix) }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Restore Git LFS
+        uses: ./.github/actions/restore-git-lfs
+
+      - name: Restore Unity Library
+        id: library
+        uses: ./.github/actions/library-cache
+        with:
+          name: ${{ matrix.lane.name }}
+
+      - name: Set up Unity
+        id: unity
+        if: steps.library.outputs.state != 'exact'
+        uses: ./.github/actions/setup-unity
+        with:
+          modules: ${{ matrix.lane.modules }}
+          unity-serial: ${{ secrets.UNITY_SERIAL }}
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-service-account-id: ${{ secrets.UNITY_SERVICE_ACCOUNT_ID }}
+          unity-service-account-secret: ${{ secrets.UNITY_SERVICE_ACCOUNT_SECRET }}
+
+      - name: Import the project
+        if: steps.library.outputs.state != 'exact'
+        env:
+          TARGET: ${{ matrix.lane.target }}
+          BUILD_PROFILE: ${{ matrix.lane.buildProfile }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          args=(-nographics -logFile "$PWD/artifacts/import.log")
+          [ -z "$TARGET" ] || args+=(-buildTarget "$TARGET")
+          [ -z "$BUILD_PROFILE" ] || args+=(-activeBuildProfile "$BUILD_PROFILE")
+          unity run . --timeout 6000 -- "${args[@]}"
+
+      - name: Upload Editor log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-warm-${{ matrix.lane.name }}-log
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Tear down Unity
+        if: always()
+        uses: ./.github/actions/teardown-unity
+        with:
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-service-account-id: ${{ secrets.UNITY_SERVICE_ACCOUNT_ID }}
+          unity-service-account-secret: ${{ secrets.UNITY_SERVICE_ACCOUNT_SECRET }}

@@ -1,0 +1,138 @@
+name: Test
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Check Unity license secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check for license secrets
+        id: check
+        env:
+          HAS_SERIAL: ${{ secrets.UNITY_SERIAL != '' }}
+          HAS_RUNNER: ${{ vars.UNITY_RUNS_ON != '' }}
+          README_URL: ${{ github.server_url }}/${{ github.repository }}#secrets
+        run: |
+          if [ "$HAS_SERIAL" = true ] || [ "$HAS_RUNNER" = true ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Unity jobs were skipped because no license secrets are configured. See [Secrets]($README_URL)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  editmode:
+    name: EditMode tests
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ${{ fromJSON(vars.UNITY_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          clean: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Clean the carried-over workspace (self-hosted)
+        if: runner.environment != 'github-hosted'
+        run: git clean -ffdx -e Library
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+        with:
+          min-free-mib: '15360'
+
+      - name: Restore Git LFS
+        uses: ./.github/actions/restore-git-lfs
+
+      - name: Restore Unity Library
+        id: library
+        uses: ./.github/actions/library-cache
+        with:
+          name: editmode
+
+      - name: Set up Unity
+        id: unity
+        uses: ./.github/actions/setup-unity
+        with:
+          unity-serial: ${{ secrets.UNITY_SERIAL }}
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-service-account-id: ${{ secrets.UNITY_SERVICE_ACCOUNT_ID }}
+          unity-service-account-secret: ${{ secrets.UNITY_SERVICE_ACCOUNT_SECRET }}
+
+      - name: Run EditMode tests
+        id: tests
+        run: |
+          set +e
+          mkdir -p artifacts
+          unity test . \
+            --mode EditMode \
+            --output artifacts/test-results.xml \
+            --timeout 4800 \
+            -- -nographics -logFile "$PWD/artifacts/editmode.log"
+          rc=$?
+          case "$rc" in
+            0) verdict=passed ;;
+            8) verdict=tests-failed ;;
+            6) verdict=no-verdict ;;
+            *) verdict="unexpected-exit-$rc" ;;
+          esac
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Summarize test results
+        if: always()
+        run: python3 .github/scripts/summarize_test_results.py artifacts/test-results.xml "EditMode tests"
+
+      - name: Write job summary
+        if: always()
+        env:
+          VERDICT: ${{ steps.tests.outputs.verdict || 'not run' }}
+          EDITOR: ${{ steps.unity.outputs.editor-version || 'not installed' }}
+          LICENSE_MODE: ${{ steps.unity.outputs.license-mode || 'not active' }}
+          LIBRARY: ${{ steps.library.outputs.state || 'unknown' }}
+        run: |
+          {
+            echo
+            echo "| Verdict | Editor | License | Library |"
+            echo "|---|---|---|---|"
+            echo "| $VERDICT | $EDITOR | $LICENSE_MODE | $LIBRARY |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results and Editor log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editmode-results
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Tear down Unity
+        if: always()
+        uses: ./.github/actions/teardown-unity
+        with:
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-service-account-id: ${{ secrets.UNITY_SERVICE_ACCOUNT_ID }}
+          unity-service-account-secret: ${{ secrets.UNITY_SERVICE_ACCOUNT_SECRET }}

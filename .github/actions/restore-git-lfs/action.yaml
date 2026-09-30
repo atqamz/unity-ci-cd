@@ -1,0 +1,43 @@
+name: Restore Git LFS
+description: Pull Git LFS objects before Unity imports anything. GitHub-hosted runners seed .git/lfs from the Actions cache.
+
+runs:
+  using: composite
+  steps:
+    - name: List Git LFS objects
+      id: lfs
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! grep -qs 'filter=lfs' .gitattributes; then
+          echo "This repository tracks nothing with Git LFS."
+          exit 0
+        fi
+        git lfs ls-files --long | sort > "$RUNNER_TEMP/lfs-objects"
+        if [ -s "$RUNNER_TEMP/lfs-objects" ]; then
+          echo "key=lfs-$RUNNER_OS-$(sha256sum "$RUNNER_TEMP/lfs-objects" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Restore Git LFS cache (GitHub-hosted)
+      id: restore
+      if: steps.lfs.outputs.key != '' && runner.environment == 'github-hosted'
+      uses: actions/cache/restore@v5
+      with:
+        path: .git/lfs
+        key: ${{ steps.lfs.outputs.key }}
+        restore-keys: lfs-${{ runner.os }}-
+
+    - name: Pull Git LFS objects
+      if: steps.lfs.outputs.key != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        git lfs install --local
+        git lfs pull
+
+    - name: Save Git LFS cache (GitHub-hosted, outside pull requests)
+      if: steps.lfs.outputs.key != '' && runner.environment == 'github-hosted' && github.event_name != 'pull_request' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: .git/lfs
+        key: ${{ steps.lfs.outputs.key }}

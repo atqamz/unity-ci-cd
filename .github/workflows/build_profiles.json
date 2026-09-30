@@ -1,0 +1,12 @@
+[
+  {
+    "name": "webgl",
+    "target": "WebGL",
+    "modules": "webgl"
+  },
+  {
+    "name": "linux",
+    "target": "StandaloneLinux64",
+    "modules": ""
+  }
+]

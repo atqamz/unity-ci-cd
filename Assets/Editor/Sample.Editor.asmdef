@@ -1,0 +1,6 @@
+{
+    "name": "Sample.Editor",
+    "includePlatforms": [
+        "Editor"
+    ]
+}
